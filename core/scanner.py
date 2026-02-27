@@ -11,6 +11,7 @@ except Exception:
     _HAS_PYWIN32 = False
 
 def _resolve_lnk(lnk_path: str):
+    """Intenta resolver un acceso directo .lnk a su destino real."""
     if not _HAS_PYWIN32:
         return None
     try:
@@ -23,7 +24,7 @@ def _resolve_lnk(lnk_path: str):
         return None
     return None
 
-# patrones de exclusión por nombre / carpeta
+# Patrones de exclusión por nombre / carpeta
 EXCLUDE_NAME_PATTERNS = [
     r"uninst", r"uninstall", r"installer", r"\bsetup\b", r"install",
     r"updat", r"patch", r"update", r"repair", r"remove", r"autorun",
@@ -77,7 +78,7 @@ def _best_exe_for_group(exe_paths, top_folder_name):
     if len(exe_paths) == 1:
         return exe_paths[0]
 
-    # 4) el más grande
+    # 4) el más grande (con manejo de errores)
     try:
         return max(exe_paths, key=lambda x: os.path.getsize(x))
     except Exception:
@@ -85,30 +86,37 @@ def _best_exe_for_group(exe_paths, top_folder_name):
 
 def buscar_juegos(root_folder: str, include_lnks_root: bool = True, debug: bool = False):
     """
-    Escanea la carpeta root_folder y devuelve:
-      - juegos: lista de dicts {nombre, ruta, folder, is_shortcut, resolved_path}
-      - skipped (solo si debug=True): lista de (ruta, razon)
+    Escanea la carpeta root_folder y devuelve una lista de juegos encontrados.
 
-    Lógica:
-      - agrupa EXE por top-level folder (primer nivel dentro de root_folder)
-      - aplica heurísticas para escoger 1 exe por top-folder
-      - también incluye .exe directamente en la raíz como entradas individuales
-      - intenta resolver .lnk en la raíz si include_lnks_root True
+    Args:
+        root_folder (str): Ruta de la carpeta a escanear.
+        include_lnks_root (bool): Si True, incluye accesos directos .lnk en la raíz.
+        debug (bool): Si True, devuelve también una lista de omitidos.
+
+    Returns:
+        list[dict]: Cada juego tiene las claves:
+            - nombre (str): Nombre para mostrar.
+            - ruta (str): Ruta al archivo (puede ser .exe o .lnk).
+            - folder (str): Carpeta del juego (para búsqueda de portadas).
+            - is_shortcut (bool): True si es un acceso directo.
+            - resolved_path (str or None): Ruta real del .exe si se pudo resolver.
+            - cover_path (None): Inicialmente None, para ser completado después.
     """
     root_folder = os.path.abspath(root_folder)
-    jogos = []
+    juegos = []
     skipped = []
     grouped = {}  # top_level_name -> list of exe paths
     seen_exes = set()
 
     # Recorrer recursivamente y agrupar por top-level folder
     for dirpath, dirnames, filenames in os.walk(root_folder):
-        # si estamos en root_folder mismo, top_key = None
+        # Obtener el nombre de la carpeta de primer nivel
         rel = os.path.relpath(dirpath, root_folder)
         if rel == ".":
             top_key = None
         else:
-            top_key = rel.split(os.sep)[0]  # primer componente
+            top_key = rel.split(os.sep)[0]
+
         for f in filenames:
             if not f.lower().endswith(".exe"):
                 continue
@@ -125,35 +133,35 @@ def buscar_juegos(root_folder: str, include_lnks_root: bool = True, debug: bool 
 
     # Procesar cada grupo
     for top, exe_list in grouped.items():
-        # eliminar duplicados
+        # Eliminar duplicados (por si acaso)
         unique_list = []
         for p in exe_list:
             pa = os.path.abspath(p)
             if pa not in unique_list:
                 unique_list.append(pa)
-        # escoger la mejor exe para este top
+        # Escoger la mejor exe para este top
         chosen = _best_exe_for_group(unique_list, top or "")
         if not chosen:
             continue
-        seen_exes.add(os.path.abspath(chosen))
+        abs_chosen = os.path.abspath(chosen)
+        if abs_chosen in seen_exes:
+            continue  # ya procesado (no debería ocurrir)
+        seen_exes.add(abs_chosen)
 
-        # nombre para mostrar: si top existe, usar top (más limpio), si no usar nombre del exe
+        # Nombre para mostrar
         if top:
             display_name = top
         else:
             display_name = os.path.splitext(os.path.basename(chosen))[0]
 
-        jogos.append({
+        juegos.append({
             "nombre": display_name,
-            "ruta": os.path.abspath(chosen),
-            "folder": os.path.dirname(os.path.abspath(chosen)),
+            "ruta": abs_chosen,
+            "folder": os.path.dirname(abs_chosen),
             "is_shortcut": False,
-            "resolved_path": os.path.abspath(chosen)
+            "resolved_path": abs_chosen,
+            "cover_path": None  # Para compatibilidad con BD
         })
-
-    # Incluir EXE directamente en la raíz (si no ya incluidos)
-    # grouped had key None for dirpath == root; we already processed that with top=None,
-    # but in case we skipped root-exes earlier due to exclusion, add none here -- skip.
 
     # Procesar .lnk en la raíz (si se pide)
     if include_lnks_root:
@@ -168,37 +176,38 @@ def buscar_juegos(root_folder: str, include_lnks_root: bool = True, debug: bool 
                             continue
                         abs_res = os.path.abspath(resolved)
                         if abs_res in seen_exes:
-                            # ya incluido
                             continue
-                        # determinar display name y folder
+                        # Determinar display name y folder
                         top = os.path.relpath(os.path.dirname(abs_res), root_folder).split(os.sep)[0]
                         display_name = top if top and top != "." else os.path.splitext(os.path.basename(abs_res))[0]
-                        jogos.append({
+                        juegos.append({
                             "nombre": display_name,
-                            "ruta": os.path.abspath(lnk_path),   # abriremos el lnk (porque mantiene args/workingdir)
+                            "ruta": os.path.abspath(lnk_path),
                             "folder": os.path.dirname(abs_res),
                             "is_shortcut": True,
-                            "resolved_path": abs_res
+                            "resolved_path": abs_res,
+                            "cover_path": None
                         })
                         seen_exes.add(abs_res)
                     else:
-                        # no pudimos resolver: aun así lo añadimos como shortcut entry
+                        # No se pudo resolver: añadimos el shortcut como tal
                         display_name = os.path.splitext(f)[0]
                         possible_folder = os.path.join(root_folder, display_name)
                         folder_for_cover = possible_folder if os.path.isdir(possible_folder) else root_folder
-                        jogos.append({
+                        juegos.append({
                             "nombre": display_name,
                             "ruta": os.path.abspath(lnk_path),
                             "folder": folder_for_cover,
                             "is_shortcut": True,
-                            "resolved_path": None
+                            "resolved_path": None,
+                            "cover_path": None
                         })
         except Exception:
             pass
 
-    # ordenar
-    jogos.sort(key=lambda x: x["nombre"].lower())
+    # Ordenar por nombre
+    juegos.sort(key=lambda x: x["nombre"].lower())
 
     if debug:
-        return jogos, skipped
-    return jogos
+        return juegos, skipped
+    return juegos

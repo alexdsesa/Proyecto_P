@@ -1,6 +1,7 @@
 # core/cover_manager.py
 import os
 import json
+import requests
 from PIL import Image
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -109,3 +110,88 @@ def get_best_cover(game_name: str, exe_folder: str):
     if folder_cover:
         return folder_cover
     return DEFAULT_COVER
+def search_cover_online(game_name):
+    """
+    Busca una portada online para el juego y la descarga.
+    Devuelve la ruta local de la imagen descargada o None.
+    (Implementación pendiente)
+    """
+    # TODO: Implementar búsqueda real (SteamGridDB, etc.)
+    return None
+
+def _load_api_key():
+    """Carga la API key desde settings.json"""
+    s = _load_settings()
+    return s.get("steamgriddb_api_key", "")
+
+def search_cover_online(game_name):
+    """
+    Busca una portada en SteamGridDB y la descarga a assets/covers/.
+    Devuelve la ruta local de la imagen o None si falla.
+    """
+    api_key = _load_api_key()
+    if not api_key:
+        print("No hay API key para SteamGridDB")
+        return None
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    safe_name = _safe_name(game_name)
+
+    # 1. Buscar el juego por nombre (autocompletado)
+    search_url = "https://www.steamgriddb.com/api/v2/search/autocomplete/" + requests.utils.quote(game_name)
+    try:
+        resp = requests.get(search_url, headers=headers, timeout=10)
+        if resp.status_code == 401:
+            print("API Key inválida")
+            return None
+        if resp.status_code != 200:
+            print(f"Error en búsqueda: {resp.status_code}")
+            return None
+
+        data = resp.json()
+        if not data.get("success") or not data.get("data"):
+            print("No se encontraron resultados")
+            return None
+
+        # Tomar el primer resultado
+        game_id = data["data"][0]["id"]
+
+        # 2. Obtener grids (portadas) - usando filtros correctos
+        grids_url = f"https://www.steamgriddb.com/api/v2/grids/game/{game_id}?dimensions=600x900&styles=alternate&types=static"
+        grids_resp = requests.get(grids_url, headers=headers, timeout=10)
+        if grids_resp.status_code != 200:
+            return None
+
+        grids_data = grids_resp.json()
+        if not grids_data.get("success") or not grids_data.get("data"):
+            return None
+
+        # Elegir la primera portada (la de mayor puntuación suele ser la primera)
+        img_url = grids_data["data"][0]["url"]
+
+        # 3. Descargar la imagen
+        img_resp = requests.get(img_url, timeout=15)
+        if img_resp.status_code != 200:
+            return None
+
+        # 4. Guardar en assets/covers/
+        dest = os.path.join(COVERS_DIR, f"{safe_name}.png")
+        with open(dest, 'wb') as f:
+            f.write(img_resp.content)
+
+        # 5. Registrar en settings.json como custom cover
+        s = _load_settings()
+        if "custom_covers" not in s:
+            s["custom_covers"] = {}
+        s["custom_covers"][game_name] = dest
+        _save_settings(s)
+
+        print(f"✅ Portada descargada para {game_name}")
+        return dest
+
+    except requests.exceptions.Timeout:
+        print(f"⏰ Timeout al buscar portada para {game_name}")
+        return None
+    except Exception as e:
+        print(f"❌ Error descargando portada para {game_name}: {e}")
+        return None
